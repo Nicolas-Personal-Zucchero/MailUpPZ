@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mailup_pz"
+version = "1.0.0"
+authors = [
+  { name="Nicolas Amadori", email="nicolas.amadori02@gmail.com" },
+]
