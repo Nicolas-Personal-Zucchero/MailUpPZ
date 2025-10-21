@@ -1,0 +1,28 @@
+# Python cache e file temporanei
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+
+# Directory di build / distribuzione
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environment (se lo usi)
+venv/
+.env/
+.env.*
+
+# File IDE / editor
+.vscode/
+.idea/
+*.swp
+*.sublime-project
+*.sublime-workspace
+
+# File temporanei di sistema
+.DS_Store
+Thumbs.db
