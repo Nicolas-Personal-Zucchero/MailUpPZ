@@ -48,7 +48,8 @@ class MailUpPZ:
         'Tag Fiera': 32,
         'Lingua': 33,
         'Alias': 34,
-        'IDstato': 35
+        'IDstato': 35,
+        'Stagionalità': 36,
     }
 
 
@@ -65,11 +66,19 @@ class MailUpPZ:
 
     ##########Privati##########
 
-    def _log_error(self, msg: str) -> None:
+    def _log_error(
+            self,
+            msg: str
+        ) -> None:
         if self.logger is not None:
             self.logger.error(msg)
 
-    def _request(self, method: str, url: str, **kwargs) -> Optional[requests.Response]:
+    def _request(
+            self,
+            method: str,
+            url: str,
+            **kwargs
+        ) -> Optional[requests.Response]:
         try:
             kwargs.setdefault("timeout", 10)
             response = requests.request(method, url, **kwargs)
@@ -81,7 +90,9 @@ class MailUpPZ:
             self._log_error(f"Error during {method} request to {url}: {e}")
         return None
 
-    def _get_auth_headers(self) -> Dict[str, str]:
+    def _get_auth_headers(
+            self
+        ) -> Dict[str, str]:
         current_time = time.time()
         
         # Request a new access token if not already obtained or if it has expired
@@ -121,43 +132,13 @@ class MailUpPZ:
         return {
             "Authorization": f"Bearer {self.access_token}"
         }
-
-    def _get_email_recipients(self, list_id: str, group_id: Optional[str] = None, page_number: int = 0) -> Optional[List[Dict[str, str]]]:
-        endpoint = f'{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/List/{list_id}/Recipients/EmailOptins'
-        if group_id is not None:
-            endpoint += "?Groups=" + str(group_id)
-
-        params = {
-            "PageNumber" : page_number,
-            "PageSize" : self._PAGE_SIZE
-        }
-
-        response = self._request("get", endpoint, headers=self._get_auth_headers(), params=params)
-        if response is None:
-            return None
-        if response.status_code != 200:
-            self._log_error(f"Error retrieving email recipients: {response.status_code} - {response.text}")
-            return None
-        
-        data = response.json()
-        recipients = []
-        for item in data.get("Items", []):
-            recipient = {}
-            recipient["idRecipient"] = str(item["idRecipient"])
-            recipient["Email"] = item["Email"]
-            recipient["Status"] = item["Status"]
-            recipient["Optin_Date"] = item["Optin_Date"]
-            recipients.append(recipient)
-        
-        if response.json().get("IsPaginated"):
-            skipped = response.json()["Skipped"]
-            TotalElementsCount = response.json()["TotalElementsCount"]
-            if skipped + self._PAGE_SIZE < TotalElementsCount:
-                recipients.extend(self._get_email_recipients(list_id, group_id, page_number + 1))
-        
-        return recipients
     
-    def _get_sms_recipients(self, list_id: str, group_id: Optional[str] = None, page_number: int = 0) -> Optional[List[Dict[str, str]]]:
+    def _get_sms_recipients(
+            self,
+            list_id: str,
+            group_id: Optional[str] = None,
+            page_number: int = 0
+        ) -> Optional[List[Dict[str, str]]]:
         endpoint = f'{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Sms/List/{list_id}/Recipients/SmsOptins'
         if group_id is not None:
             endpoint += "?Groups=" + str(group_id)
@@ -192,7 +173,14 @@ class MailUpPZ:
         
         return recipients
     
-    def _create_recipient(self, endpoint: str, email: str, mobile_prefix: str = "", mobile_number: str = "", fields: Dict[str, str] = None) -> Optional[str]:
+    def _create_recipient(
+            self,
+            endpoint: str,
+            email: str,
+            mobile_prefix: str = "",
+            mobile_number: str = "",
+            fields: Dict[str, str] = None
+        ) -> Optional[str]:
         if fields is None:
             fields = {}
         for nome, _ in fields.items(): #Controllo che tutti i campi siano presenti nel dizionario
@@ -223,15 +211,21 @@ class MailUpPZ:
             return None
         
         return str(response.json())
-    
-    def _get_email_recipients_subscribed(self, list_id: str, group_id: Optional[str] = None, page_number: int = 0) -> Optional[List[Dict[str, str]]]:
-        endpoint = f'{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/List/{list_id}/Recipients/Subscribed'
+
+    def _get_email_recipients(
+            self,
+            recipient_type: str,
+            list_id: str,
+            group_id: Optional[str] = None,
+            page_number: int = 0
+    ) -> Optional[List[Dict[str, str]]]:
+        endpoint = f'{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/List/{list_id}/Recipients/{recipient_type}'
         if group_id is not None:
             endpoint += "?Groups=" + str(group_id)
-
+        print(endpoint)
         params = {
-            "PageNumber" : page_number,
-            "PageSize" : self._PAGE_SIZE
+            "PageNumber": page_number,
+            "PageSize": self._PAGE_SIZE
         }
 
         response = self._request("get", endpoint, headers=self._get_auth_headers(), params=params)
@@ -240,45 +234,46 @@ class MailUpPZ:
         if response.status_code != 200:
             self._log_error(f"Error retrieving email recipients: {response.status_code} - {response.text}")
             return None
-        
+
         data = response.json()
         recipients = []
         for item in data.get("Items", []):
-            recipient = {
-                f.get("Description"): f.get("Value") if f.get("Value") != "" else None
-                for f in item["Fields"]
-            }
+            recipient = {}
+            if "Fields" in item:
+                recipient = {
+                    f.get("Description"): f.get("Value") if f.get("Value") != "" else None
+                    for f in item["Fields"]
+                }
             recipient["idRecipient"] = str(item["idRecipient"])
             recipient["Email"] = item["Email"]
             recipient["MobileNumber"] = item["MobileNumber"]
             recipient["MobilePrefix"] = item["MobilePrefix"]
             recipients.append(recipient)
-        
+
         if response.json().get("IsPaginated"):
             skipped = response.json()["Skipped"]
             TotalElementsCount = response.json()["TotalElementsCount"]
             if skipped + self._PAGE_SIZE < TotalElementsCount:
-                recipients.extend(self._get_email_recipients_subscribed(list_id, group_id, page_number + 1))
-        
+                recipients.extend(self._get_email_recipients(recipient_type, list_id, group_id, page_number + 1))
+
         return recipients
-    
+
     ##########Pubblici##########
 
     #Tested and working
-    def get_email_list_recipients_subscribed(self, list_id: str) -> Optional[List[Dict[str, str]]]:
-        return self._get_email_recipients_subscribed(list_id)
-    
+    def get_email_list_recipients_subscribed(self, list_id: str, group_id: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
+        return self._get_email_recipients("Subscribed", list_id, group_id)
+
+    def get_email_list_recipients_unsubscribed(self, list_id: str, group_id: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
+        return self._get_email_recipients("Unsubscribed", list_id, group_id)
+        
     #Tested and working
     def get_available_fields(self) -> List[str]:
         return list(self._DIZIONARIO.keys())
     
     #Tested and working
-    def get_email_list_recipients(self, list_id: str) -> Optional[List[Dict[str, str]]]:
-        return self._get_email_recipients(list_id)
-
-    #Tested and working
-    def get_email_group_recipients(self, list_id: str, group_id: str) -> Optional[List[Dict[str, str]]]:
-        return self._get_email_recipients(list_id, group_id)
+    def get_email_list_recipients(self, list_id: str, group_id: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
+        return self._get_email_recipients("EmailOptins", list_id, group_id)
     
     #Tested and working
     def get_sms_list_recipients(self, list_id: str) -> Optional[List[Dict[str, str]]]:
