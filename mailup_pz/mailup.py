@@ -222,7 +222,6 @@ class MailUpPZ:
         endpoint = f'{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/List/{list_id}/Recipients/{recipient_type}'
         if group_id is not None:
             endpoint += "?Groups=" + str(group_id)
-        print(endpoint)
         params = {
             "PageNumber": page_number,
             "PageSize": self._PAGE_SIZE
@@ -246,8 +245,9 @@ class MailUpPZ:
                 }
             recipient["idRecipient"] = str(item["idRecipient"])
             recipient["Email"] = item["Email"]
-            recipient["MobileNumber"] = item["MobileNumber"]
-            recipient["MobilePrefix"] = item["MobilePrefix"]
+            recipient["Optin_Date"] = item["Optin_Date"]
+            # recipient["MobileNumber"] = item["MobileNumber"]
+            # recipient["MobilePrefix"] = item["MobilePrefix"]
             recipients.append(recipient)
 
         if response.json().get("IsPaginated"):
