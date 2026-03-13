@@ -1,4 +1,11 @@
-#pip install .
+"""
+Libreria MailUpPZ
+----------------
+Modulo per l'integrazione semplificata con le API REST di MailUp.
+Gestisce l'autenticazione OAuth2 (Password Grant e Refresh Token) con persistenza
+locale e fornisce wrapper per la gestione di destinatari Email e SMS.
+"""
+
 from typing import Optional, Dict, Any, List
 import requests
 from datetime import datetime, timedelta
@@ -8,9 +15,16 @@ import base64
 import logging
 from logging import Logger
 import os
+import sys
 
 class MailUpPZ:
-    # client = None
+    """
+    Client principale per l'interazione con MailUp.
+
+    Questa classe automatizza il recupero dei token e semplifica le chiamate
+    ai vari endpoint per la gestione di liste, gruppi e messaggi.
+    """
+
     _BASE_URL = "https://services.mailup.com"
     _API_VERSION = "v1.1"
     _PAGE_SIZE = 1000
@@ -55,6 +69,16 @@ class MailUpPZ:
 
 
     def __init__(self, client_id: str, client_secret: str, username: str, password: str, logger: Logger = None) -> None:
+        """
+        Inizializza il client MailUp.
+
+        Args:
+            client_id (str): ID fornito da MailUp sezione Developer.
+            client_secret (str): Secret fornito da MailUp sezione Developer.
+            username (str): Nome utente per il login.
+            password (str): Password per il login.
+            logger (Logger, optional): Istanza di un logger per il debug.
+        """
         self.client_id = client_id
         self.client_secret = client_secret
         self.username = username
@@ -69,19 +93,12 @@ class MailUpPZ:
     # METODI PRIVATI (Utility & Internal Requests)
     # =========================================================
 
-    def _log_error(
-            self,
-            msg: str
-        ) -> None:
+    def _log_error(self,msg: str) -> None:
         if self.logger is not None:
             self.logger.error(msg)
 
-    def _request(
-            self,
-            method: str,
-            url: str,
-            **kwargs
-        ) -> Optional[requests.Response]:
+    def _request(self,method: str,url: str,**kwargs) -> Optional[requests.Response]:
+        """Wrapper interno per le richieste HTTP con gestione timeout ed errori."""
         try:
             kwargs.setdefault("timeout", 10)
             response = requests.request(method, url, **kwargs)
@@ -94,20 +111,24 @@ class MailUpPZ:
         return None
 
     def _get_auth_headers(self) -> Dict[str, str]:
-        return {"Authorization": f"Bearer {self.get_valid_token()}"}
+        """Genera gli header con il token Bearer valido."""
+        return {"Authorization": f"Bearer {self._get_valid_token()}"}
 
     # =========================================================
     # METODI PRIVATI (Gestione Autenticazione e Token)
     # =========================================================
 
     def _get_token_file_path(self):
-        """Restituisce il percorso assoluto in cui salvare il file dei token, nella cartella della libreria."""
-        library_dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.join(library_dir, ".mailup_tokens.json")
+        """Restituisce il percorso del file JSON dei token."""
+        # library_dir = os.path.dirname(os.path.abspath(__file__))
+        main_script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        return os.path.join(main_script_dir, ".mailup_tokens.json")
 
     def _save_tokens(self, tokens):
-        """Calcola la scadenza e salva i token su un file JSON locale."""
-        # Imposta la scadenza con 300 secondi di margine di sicurezza
+        """
+        Calcola la scadenza e salva i token su disco.
+        Imposta la scadenza con 300 secondi di margine di sicurezza
+        """
         expires_in = tokens.get('expires_in', 3600)
         tokens['timestamp_scadenza'] = (datetime.now() + timedelta(seconds=expires_in - 300)).timestamp()
 
@@ -121,7 +142,7 @@ class MailUpPZ:
                 self.logger.error(f"Errore nel salvataggio dei token: {e}")
 
     def _load_tokens(self):
-        """Legge i token dal file JSON, se esiste."""
+        """Carica i token dal file locale."""
         path = self._get_token_file_path()
         if os.path.exists(path):
             try:
@@ -133,7 +154,7 @@ class MailUpPZ:
         return None
 
     def _password_grant_login(self, tentativo=1):
-        """Fa il login vero e proprio usando Username e Password (metodo fallback)."""
+        """Esegue il login iniziale tramite Password Grant."""
         url = "https://services.mailup.com/Authorization/OAuth/Token"
         auth_str = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
 
@@ -169,7 +190,7 @@ class MailUpPZ:
                 return None
 
     def _refresh_token_call(self, refresh_token):
-        """Chiede a MailUp un nuovo Access Token usando il Refresh Token."""
+        """Richiede un nuovo access token tramite refresh token."""
         url = "https://services.mailup.com/Authorization/OAuth/Token"
         auth_str = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
 
@@ -190,9 +211,9 @@ class MailUpPZ:
                 self.logger.warning(f"Refresh token fallito o scaduto: {response.text}")
             return None
 
-    def get_valid_token(self):
+    def _get_valid_token(self):
         """
-        Restituisce un Access Token valido, leggendolo dal file, facendo il refresh, oppure loggandosi da zero.
+        Recupera o genera un Access Token valido.
         """
         tokens = self._load_tokens()
         ora_attuale = datetime.now().timestamp()
