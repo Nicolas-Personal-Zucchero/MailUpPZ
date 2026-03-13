@@ -225,7 +225,7 @@ class MailUpPZ:
         # CASO 2: L'access token è scaduto, ma abbiamo un refresh_token
         if tokens and 'refresh_token' in tokens:
             if hasattr(self, 'logger') and self.logger:
-                self.logger.info("Access token scaduto, provo a rinfrescarlo...")
+                self.logger.info("Access token scaduto, provo a refresharlo...")
             new_tokens = self._refresh_token_call(tokens['refresh_token'])
 
             if new_tokens:
@@ -322,9 +322,11 @@ class MailUpPZ:
                 }
             recipient["idRecipient"] = str(item["idRecipient"])
             recipient["Email"] = item["Email"]
-            recipient["Optin_Date"] = item["Optin_Date"]
-            # recipient["MobileNumber"] = item["MobileNumber"]
-            # recipient["MobilePrefix"] = item["MobilePrefix"]
+            if "Optin_Date" in item:
+                recipient["Optin_Date"] = item["Optin_Date"]
+            if "MobileNumber" in item and "MobilePrefix" in item:
+                recipient["MobileNumber"] = item["MobileNumber"]
+                recipient["MobilePrefix"] = item["MobilePrefix"]
             recipients.append(recipient)
 
         if response.json().get("IsPaginated"):
