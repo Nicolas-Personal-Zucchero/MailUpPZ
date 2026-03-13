@@ -1,12 +1,13 @@
 #pip install .
 from typing import Optional, Dict, Any, List
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import time
 import base64
 import logging
 from logging import Logger
+import os
 
 class MailUpPZ:
     # client = None
@@ -64,7 +65,9 @@ class MailUpPZ:
         self.obtained_time = None
         self.elapsed_time = None
 
-    ##########Privati##########
+    # =========================================================
+    # METODI PRIVATI (Utility & Internal Requests)
+    # =========================================================
 
     def _log_error(
             self,
@@ -90,49 +93,141 @@ class MailUpPZ:
             self._log_error(f"Error during {method} request to {url}: {e}")
         return None
 
-    def _get_auth_headers(
-            self
-        ) -> Dict[str, str]:
-        current_time = time.time()
-        
-        # Request a new access token if not already obtained or if it has expired
-        if (self.access_token is None or
-            self.obtained_time is None or
-            self.elapsed_time is None or
-            current_time - self.obtained_time >= self.elapsed_time - 100
-        ):
-            # Encode client data in base64
-            client_data = f"{self.client_id}:{self.client_secret}"
-            client_data_bytes = client_data.encode("ascii")
-            base64_client_data_bytes = base64.b64encode(client_data_bytes)
-            base64_client_data = base64_client_data_bytes.decode("ascii")
-            
-            # Perform authentication
-            auth_url = f"{self._BASE_URL}/Authorization/OAuth/Token"
-            auth_data = {
-                "grant_type": "password",
-                "username": self.username,
-                "password": self.password
-            }
-            auth_headers = {
-                "Authorization": f"Basic {base64_client_data}",
-                "Content-Type": "application/x-www-form-urlencoded"
-            }
-            response = self._request("post", auth_url, data=auth_data, headers=auth_headers)
-            if response is None:
-                return {}
-            response_data = response.json()
-            
-            # Update token variables
-            self.access_token = response_data["access_token"]
-            self.elapsed_time = response_data["expires_in"]
-            self.refresh_token = response_data["refresh_token"]
-            self.obtained_time = time.time()
-        
-        return {
-            "Authorization": f"Bearer {self.access_token}"
+    def _get_auth_headers(self) -> Dict[str, str]:
+        return {"Authorization": f"Bearer {self.get_valid_token()}"}
+
+    # =========================================================
+    # METODI PRIVATI (Gestione Autenticazione e Token)
+    # =========================================================
+
+    def _get_token_file_path(self):
+        """Restituisce il percorso assoluto in cui salvare il file dei token, nella cartella della libreria."""
+        library_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(library_dir, ".mailup_tokens.json")
+
+    def _save_tokens(self, tokens):
+        """Calcola la scadenza e salva i token su un file JSON locale."""
+        # Imposta la scadenza con 300 secondi di margine di sicurezza
+        expires_in = tokens.get('expires_in', 3600)
+        tokens['timestamp_scadenza'] = (datetime.now() + timedelta(seconds=expires_in - 300)).timestamp()
+
+        try:
+            with open(self._get_token_file_path(), 'w') as f:
+                json.dump(tokens, f)
+            if hasattr(self, 'logger') and self.logger:
+                self.logger.info("Token salvati correttamente su file locale.")
+        except Exception as e:
+            if hasattr(self, 'logger') and self.logger:
+                self.logger.error(f"Errore nel salvataggio dei token: {e}")
+
+    def _load_tokens(self):
+        """Legge i token dal file JSON, se esiste."""
+        path = self._get_token_file_path()
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                if hasattr(self, 'logger') and self.logger:
+                    self.logger.error(f"Errore nel caricamento dei token: {e}")
+        return None
+
+    def _password_grant_login(self, tentativo=1):
+        """Fa il login vero e proprio usando Username e Password (metodo fallback)."""
+        url = "https://services.mailup.com/Authorization/OAuth/Token"
+        auth_str = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": f"Basic {auth_str}"
         }
+        data = {
+            "grant_type": "password",
+            "username": self.username,
+            "password": self.password
+        }
+
+        response = requests.post(url, headers=headers, data=data)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            if hasattr(self, 'logger') and self.logger:
+                self.logger.error(f"Errore login Password Grant: {response.text}. Tentativo {tentativo}.")
+
+            # Mi fermo dopo 5 tentativi per evitare loop infiniti o ban dell'IP
+            if tentativo < 5:
+                try:
+                    password_blocks = self.password.split("-")
+                    self.password = "-".join(password_blocks[:-1]) + "-" + str(int(password_blocks[-1]) + 1)
+                    if self.logger: self.logger.info(f"Ritento con una nuova password...")
+                    return self._password_grant_login(tentativo + 1) # <-- Passo il contatore incrementato
+                except ValueError:
+                    if self.logger: self.logger.error("Formato password non valido per l'incremento numerico.")
+                    return None
+            else:
+                if self.logger: self.logger.error("Raggiunto il limite massimo di tentativi per la password.")
+                return None
+
+    def _refresh_token_call(self, refresh_token):
+        """Chiede a MailUp un nuovo Access Token usando il Refresh Token."""
+        url = "https://services.mailup.com/Authorization/OAuth/Token"
+        auth_str = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": f"Basic {auth_str}"
+        }
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token
+        }
+
+        response = requests.post(url, headers=headers, data=data)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            if hasattr(self, 'logger') and self.logger:
+                self.logger.warning(f"Refresh token fallito o scaduto: {response.text}")
+            return None
+
+    def get_valid_token(self):
+        """
+        Restituisce un Access Token valido, leggendolo dal file, facendo il refresh, oppure loggandosi da zero.
+        """
+        tokens = self._load_tokens()
+        ora_attuale = datetime.now().timestamp()
+
+        # CASO 1: Abbiamo il token salvato ed è ancora valido (non scaduto)
+        if tokens and ora_attuale < tokens.get('timestamp_scadenza', 0):
+            return tokens['access_token']
+
+        # CASO 2: L'access token è scaduto, ma abbiamo un refresh_token
+        if tokens and 'refresh_token' in tokens:
+            if hasattr(self, 'logger') and self.logger:
+                self.logger.info("Access token scaduto, provo a rinfrescarlo...")
+            new_tokens = self._refresh_token_call(tokens['refresh_token'])
+
+            if new_tokens:
+                self._save_tokens(new_tokens)
+                return new_tokens['access_token']
+
+        # CASO 3: Non c'è file locale, oppure anche il refresh_token era scaduto -> Login da zero
+        if hasattr(self, 'logger') and self.logger:
+            self.logger.info("Nessun token valido trovato. Eseguo login completo con credenziali...")
+
+        new_tokens = self._password_grant_login()
+        if new_tokens:
+            self._save_tokens(new_tokens)
+            return new_tokens['access_token']
+
+        if hasattr(self, 'logger') and self.logger:
+            self.logger.error("Impossibile ottenere un token da MailUp.")
+        return None
     
+    # =========================================================
+    # METODI PRIVATI (Helper Core per SMS ed Email)
+    # =========================================================
+
     def _get_sms_recipients(
             self,
             list_id: str,
@@ -173,45 +268,6 @@ class MailUpPZ:
         
         return recipients
     
-    def _create_recipient(
-            self,
-            endpoint: str,
-            email: str,
-            mobile_prefix: str = "",
-            mobile_number: str = "",
-            fields: Dict[str, str] = None
-        ) -> Optional[str]:
-        if fields is None:
-            fields = {}
-        for nome, _ in fields.items(): #Controllo che tutti i campi siano presenti nel dizionario
-            if nome not in self._DIZIONARIO:
-                self._log_error(f"Invalid field: {nome}, creation aborted.")
-                return None
-            
-        data = {}
-        data["Email"] = email
-
-        if mobile_prefix and mobile_number:
-            data["MobilePrefix"] = mobile_prefix
-            data["MobileNumber"] = mobile_number
-
-        data["Fields"] = [
-                {
-                    "Description": nome,
-                    "Id": self._DIZIONARIO[nome],
-                    "Value": valore
-                } for nome, valore in fields.items()
-            ]
-
-        response = self._request("post", endpoint, headers=self._get_auth_headers(), json=data)
-        if response is None:
-            return None
-        if response.status_code != 200:
-            self._log_error(f"Error creating recipient: {response.status_code} - {response.text}")
-            return None
-        
-        return str(response.json())
-
     def _get_email_recipients(
             self,
             recipient_type: str,
@@ -258,83 +314,53 @@ class MailUpPZ:
 
         return recipients
 
-    ##########Pubblici##########
+    def _create_recipient(
+            self,
+            endpoint: str,
+            email: str,
+            mobile_prefix: str = "",
+            mobile_number: str = "",
+            fields: Dict[str, str] = None
+        ) -> Optional[str]:
+        if fields is None:
+            fields = {}
+        for nome, _ in fields.items(): #Controllo che tutti i campi siano presenti nel dizionario
+            if nome not in self._DIZIONARIO:
+                self._log_error(f"Invalid field: {nome}, creation aborted.")
+                return None
+            
+        data = {}
+        data["Email"] = email
 
-    #Tested and working
-    def get_email_list_recipients_subscribed(self, list_id: str, group_id: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
-        return self._get_email_recipients("Subscribed", list_id, group_id)
+        if mobile_prefix and mobile_number:
+            data["MobilePrefix"] = mobile_prefix
+            data["MobileNumber"] = mobile_number
 
-    def get_email_list_recipients_unsubscribed(self, list_id: str, group_id: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
-        return self._get_email_recipients("Unsubscribed", list_id, group_id)
-        
-    #Tested and working
-    def get_available_fields(self) -> List[str]:
-        return list(self._DIZIONARIO.keys())
-    
-    #Tested and working
-    def get_email_list_recipients(self, list_id: str, group_id: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
-        return self._get_email_recipients("EmailOptins", list_id, group_id)
-    
-    #Tested and working
-    def get_sms_list_recipients(self, list_id: str) -> Optional[List[Dict[str, str]]]:
-        return self._get_sms_recipients(list_id)
-    
-    #Tested and working
-    def get_sms_group_recipients(self, list_id: str, group_id: str) -> Optional[List[Dict[str, str]]]:
-        return self._get_sms_recipients(list_id, group_id)
-    
-    #Tested and working
-    def get_id_from_email(self, email: str) -> Optional[str]:
-        endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Recipients?email=\"{email}\""
+        data["Fields"] = [
+                {
+                    "Description": nome,
+                    "Id": self._DIZIONARIO[nome],
+                    "Value": valore
+                } for nome, valore in fields.items()
+            ]
 
-        response = self._request("get", endpoint, headers=self._get_auth_headers())
-        if response is None:
-            return None
-        
-        data = response.json()
-        items = data.get("Items", [])
-        if response.status_code != 200 or len(items) == 0:
-            self._log_error(f"Error retrieving recipient ID: {response.status_code} - {response.text}")
-            return None
-        return str(items[0]["idRecipient"])
-
-    #Tested and working
-    def get_recipient_by_id(self, id_recipient: str) -> Optional[Dict[str, str]]:
-        endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Recipients/{id_recipient}"
-
-        response = self._request("get", endpoint, headers=self._get_auth_headers())
+        response = self._request("post", endpoint, headers=self._get_auth_headers(), json=data)
         if response is None:
             return None
         if response.status_code != 200:
-            self._log_error(f"Error retrieving recipient: {response.status_code} - {response.text}")
+            self._log_error(f"Error creating recipient: {response.status_code} - {response.text}")
             return None
         
-        fields = {f.get("Description"):f.get("Value") for f in response.json()["Fields"] if f.get("Value") != ""} #Prendi i field se non sono vuoti
-        fields["idRecipient"] = response.json()["idRecipient"]
-        fields["Email"] = response.json()["Email"]
-        fields["MobileNumber"] = response.json()["MobileNumber"]
-        fields["MobilePrefix"] = response.json()["MobilePrefix"]
+        return str(response.json())
 
-        return fields
+    # =========================================================
+    # FUNZIONALITÀ PUBBLICHE: SMS
+    # =========================================================
 
-    #Tested and working
-    def create_recipient_to_list(self, list_id: str, email: str, mobile_prefix: str = "", mobile_number: str = "", fields: Dict[str, str] = None) -> Optional[str]:
-        endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/List/{list_id}/Recipient"
-        return self._create_recipient(endpoint, email, mobile_prefix, mobile_number, fields)
-    
-    #Tested and working
-    def create_recipient_to_group(self, group_id: str, email: str, mobile_prefix: str = "", mobile_number: str = "", fields: Dict[str, str] = None) -> Optional[str]:
-        endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Group/{group_id}/Recipient"
-        return self._create_recipient(endpoint, email, mobile_prefix, mobile_number, fields)
-    
-    #Tested and working
-    def subscribe_recipient_to_group(self, group_id: str, id: str) -> None:
-        endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Group/{group_id}/Subscribe/{id}"
-        
-        self._request("post", endpoint, headers=self._get_auth_headers())
-        return
-    
-    #Tested and working
+    def get_sms_recipients(self, list_id: str, group_id: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
+        """Restituisce tutti i destinatari SMS (Iscritti, Disiscritti, Sospesi)."""
+        return self._get_sms_recipients(list_id, group_id)
+
     def send_message(self, id_message: str, id_recipient: str) -> bool:
         recipient = self.get_recipient_by_id(id_recipient)
         if recipient is None:
@@ -357,3 +383,84 @@ class MailUpPZ:
             return False
         
         return True
+    
+    def get_sms_list_recipients(self, list_id: str) -> Optional[List[Dict[str, str]]]:
+        """[DEPRECATED] Usa get_sms_recipients."""
+        return self._get_sms_recipients(list_id)
+    
+    def get_sms_group_recipients(self, list_id: str, group_id: str) -> Optional[List[Dict[str, str]]]:
+        """[DEPRECATED] Usa get_sms_recipients con group_id."""
+        return self._get_sms_recipients(list_id, group_id)
+    
+    # =========================================================
+    # FUNZIONALITÀ PUBBLICHE: EMAIL
+    # =========================================================
+
+    def get_email_list_recipients(self, list_id: str, group_id: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
+        """Restituisce i destinatari EmailOptins."""
+        return self._get_email_recipients("EmailOptins", list_id, group_id)
+
+    def get_email_list_recipients_subscribed(self, list_id: str, group_id: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
+        """Restituisce solo i destinatari iscritti."""
+        return self._get_email_recipients("Subscribed", list_id, group_id)
+
+    def get_email_list_recipients_unsubscribed(self, list_id: str, group_id: Optional[str] = None) -> Optional[List[Dict[str, str]]]:
+        """Restituisce solo i destinatari disiscritti."""
+        return self._get_email_recipients("Unsubscribed", list_id, group_id)
+
+    # =========================================================
+    # FUNZIONALITÀ PUBBLICHE: GENERICHE (Recipient & Fields)
+    # =========================================================
+
+    def get_available_fields(self) -> List[str]:
+        """Restituisce la lista dei campi disponibili."""
+        return list(self._DIZIONARIO.keys())
+    
+    def get_id_from_email(self, email: str) -> Optional[str]:
+        """Recupera l'ID interno di MailUp partendo dall'indirizzo email."""
+        endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Recipients?email=\"{email}\""
+
+        response = self._request("get", endpoint, headers=self._get_auth_headers())
+        if response is None:
+            return None
+        
+        data = response.json()
+        items = data.get("Items", [])
+        if response.status_code != 200 or len(items) == 0:
+            self._log_error(f"Error retrieving recipient ID: {response.status_code} - {response.text}")
+            return None
+        return str(items[0]["idRecipient"])
+
+    def get_recipient_by_id(self, id_recipient: str) -> Optional[Dict[str, str]]:
+        """Recupera i dettagli completi di un destinatario tramite il suo ID."""
+        endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Recipients/{id_recipient}"
+
+        response = self._request("get", endpoint, headers=self._get_auth_headers())
+        if response is None:
+            return None
+        if response.status_code != 200:
+            self._log_error(f"Error retrieving recipient: {response.status_code} - {response.text}")
+            return None
+        
+        fields = {f.get("Description"):f.get("Value") for f in response.json()["Fields"] if f.get("Value") != ""} #Prendi i field se non sono vuoti
+        fields["idRecipient"] = response.json()["idRecipient"]
+        fields["Email"] = response.json()["Email"]
+        fields["MobileNumber"] = response.json()["MobileNumber"]
+        fields["MobilePrefix"] = response.json()["MobilePrefix"]
+
+        return fields
+
+    def create_recipient_to_list(self, list_id: str, email: str, mobile_prefix: str = "", mobile_number: str = "", fields: Dict[str, str] = None) -> Optional[str]:
+        """Crea un nuovo destinatario all'interno di una lista specifica."""
+        endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/List/{list_id}/Recipient"
+        return self._create_recipient(endpoint, email, mobile_prefix, mobile_number, fields)
+
+    def create_recipient_to_group(self, group_id: str, email: str, mobile_prefix: str = "", mobile_number: str = "", fields: Dict[str, str] = None) -> Optional[str]:
+        """Crea un nuovo destinatario all'interno di un gruppo specifico."""
+        endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Group/{group_id}/Recipient"
+        return self._create_recipient(endpoint, email, mobile_prefix, mobile_number, fields)
+    
+    def subscribe_recipient_to_group(self, group_id: str, id: str) -> None:
+        """Iscrive un destinatario esistente a un gruppo specifico."""
+        endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Group/{group_id}/Subscribe/{id}"
+        self._request("post", endpoint, headers=self._get_auth_headers())
