@@ -27,7 +27,7 @@ class MailUpPZ:
 
     _BASE_URL = "https://services.mailup.com"
     _API_VERSION = "v1.1"
-    _PAGE_SIZE = 1000
+    _PAGE_SIZE = 600 # Modificato da 1000 a 600 per evitare timeout eccessivi su liste molto grandi, si spera
     _DIZIONARIO = {
         'nome': 1,
         'cognome': 2,
