@@ -100,7 +100,7 @@ class MailUpPZ:
     def _request(self,method: str,url: str,**kwargs) -> Optional[requests.Response]:
         """Wrapper interno per le richieste HTTP con gestione timeout ed errori."""
         try:
-            kwargs.setdefault("timeout", 10)
+            kwargs.setdefault("timeout", 30)
             response = requests.request(method, url, **kwargs)
             response.raise_for_status()
             return response
@@ -135,8 +135,6 @@ class MailUpPZ:
         try:
             with open(self._get_token_file_path(), 'w') as f:
                 json.dump(tokens, f)
-            if hasattr(self, 'logger') and self.logger:
-                self.logger.info("Token salvati correttamente su file locale.")
         except Exception as e:
             if hasattr(self, 'logger') and self.logger:
                 self.logger.error(f"Errore nel salvataggio dei token: {e}")
@@ -224,8 +222,6 @@ class MailUpPZ:
 
         # CASO 2: L'access token è scaduto, ma abbiamo un refresh_token
         if tokens and 'refresh_token' in tokens:
-            if hasattr(self, 'logger') and self.logger:
-                self.logger.info("Access token scaduto, provo a refresharlo...")
             new_tokens = self._refresh_token_call(tokens['refresh_token'])
 
             if new_tokens:
