@@ -380,17 +380,12 @@ class MailUpPZ:
         """Restituisce tutti i destinatari SMS (Iscritti, Disiscritti, Sospesi)."""
         return self._get_sms_recipients(list_id, group_id)
 
-    def send_message(self, id_message: str, id_recipient: str) -> bool:
-        recipient = self.get_recipient_by_id(id_recipient)
-        if recipient is None:
-            self._log_error(f"Recipient with ID {id_recipient} not found.")
-            return False
-        
+    def send_message(self, mobile_prefix: str, mobile_number: str, id_message: str) -> bool:
         endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Sms/Send"
 
         data = {
-            "Number":recipient["MobileNumber"],
-            "Prefix":recipient["MobilePrefix"],
+            "Prefix":mobile_prefix,
+            "Number":mobile_number,
             "idMessage":id_message
         }
         
