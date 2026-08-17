@@ -6,16 +6,16 @@ Gestisce l'autenticazione OAuth2 (Password Grant e Refresh Token) con persistenz
 locale e fornisce wrapper per la gestione di destinatari Email e SMS.
 """
 
-from typing import Optional, Dict, Any, List
-import requests
-from datetime import datetime, timedelta
-import json
-import time
-import base64
-import logging
-from logging import Logger
 import os
 import sys
+import json
+import base64
+import requests
+from typing import Optional, Dict, Any, List
+from datetime import datetime, timedelta
+from logging import Logger
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 class MailUpPZ:
     """
@@ -67,7 +67,6 @@ class MailUpPZ:
         'Stagionalità': 36,
     }
 
-
     def __init__(self, client_id: str, client_secret: str, username: str, password: str, logger: Logger = None) -> None:
         """
         Inizializza il client MailUp.
@@ -89,6 +88,16 @@ class MailUpPZ:
         self.obtained_time = None
         self.elapsed_time = None
 
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS", "POST"] 
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
+        self.session.mount("https://", adapter)
+
     # =========================================================
     # METODI PRIVATI (Utility & Internal Requests)
     # =========================================================
@@ -97,11 +106,11 @@ class MailUpPZ:
         if self.logger is not None:
             self.logger.error(msg)
 
-    def _request(self,method: str,url: str,**kwargs) -> Optional[requests.Response]:
-        """Wrapper interno per le richieste HTTP con gestione timeout ed errori."""
+    def _request(self, method: str, url: str, **kwargs) -> Optional[requests.Response]:
+        """Wrapper interno per le richieste HTTP utilizzando la Sessione persistente."""
         try:
             kwargs.setdefault("timeout", 30)
-            response = requests.request(method, url, **kwargs)
+            response = self.session.request(method, url, **kwargs)
             response.raise_for_status()
             return response
         except requests.exceptions.Timeout:
@@ -166,7 +175,7 @@ class MailUpPZ:
             "password": self.password
         }
 
-        response = requests.post(url, headers=headers, data=data)
+        response = self.session.post(url, headers=headers, data=data)
         if response.status_code == 200:
             return response.json()
         else:
@@ -201,7 +210,7 @@ class MailUpPZ:
             "refresh_token": refresh_token
         }
 
-        response = requests.post(url, headers=headers, data=data)
+        response = self.session.post(url, headers=headers, data=data)
         if response.status_code == 200:
             return response.json()
         else:
@@ -240,7 +249,41 @@ class MailUpPZ:
         if hasattr(self, 'logger') and self.logger:
             self.logger.error("Impossibile ottenere un token da MailUp.")
         return None
-    
+
+    def _fetch_paginated(self, endpoint: str, params: dict, item_parser: callable) -> Optional[List[Dict[str, Any]]]:
+        """
+        Helper iterativo per la gestione unificata della paginazione.
+        Previene RecursionError ed esegue il parsing tramite callback.
+        """
+        items = []
+        page_number = params.get("PageNumber", 0)
+
+        while True:
+            params["PageNumber"] = page_number
+            params["PageSize"] = self._PAGE_SIZE
+            
+            response = self._request("get", endpoint, headers=self._get_auth_headers(), params=params)
+            
+            if response is None or response.status_code != 200:
+                if response is not None:
+                    self._log_error(f"Errore fetch paginato [{response.status_code}]: {response.text}")
+                return None
+
+            payload = response.json()
+            
+            for item in payload.get("Items", []):
+                items.append(item_parser(item))
+
+            is_paginated = payload.get("IsPaginated", False)
+            skipped = payload.get("Skipped", 0)
+            total_elements = payload.get("TotalElementsCount", 0)
+
+            if not is_paginated or (skipped + self._PAGE_SIZE) >= total_elements:
+                break
+
+            page_number += 1
+
+        return items
     # =========================================================
     # METODI PRIVATI (Helper Core per SMS ed Email)
     # =========================================================
@@ -252,70 +295,38 @@ class MailUpPZ:
             page_number: int = 0
         ) -> Optional[List[Dict[str, str]]]:
         endpoint = f'{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Sms/List/{list_id}/Recipients/SmsOptins'
+        params = {"PageNumber": page_number}
         if group_id is not None:
-            endpoint += "?Groups=" + str(group_id)
+            params["Groups"] = str(group_id)
 
-        params = {
-            "PageNumber" : page_number,
-            "PageSize" : self._PAGE_SIZE
-        }
+        def parse_sms(item: dict) -> dict:
+            return {
+                "idRecipient": str(item["idRecipient"]),
+                "MobileNumber": item["MobileNumber"],
+                "MobilePrefix": item["MobilePrefix"],
+                "Status": item["Status"],
+                "Optin_Date": item["Optin_Date"]
+            }
 
-        response = self._request("get", endpoint, headers=self._get_auth_headers(), params=params)
-        if response is None:
-            return None
-        if response.status_code != 200:
-            self._log_error(f"Error retrieving SMS recipients: {response.status_code} - {response.text}")
-            return None
-        
-        recipients = []
-        for item in response.json()["Items"]:
-            recipient = {}
-            recipient["idRecipient"] = str(item["idRecipient"])
-            recipient["MobileNumber"] = item["MobileNumber"]
-            recipient["MobilePrefix"] = item["MobilePrefix"]
-            recipient["Status"] = item["Status"]
-            recipient["Optin_Date"] = item["Optin_Date"]
-            recipients.append(recipient)
-        
-        if response.json().get("IsPaginated"):
-            skipped = response.json()["Skipped"]
-            TotalElementsCount = response.json()["TotalElementsCount"]
-            if skipped + self._PAGE_SIZE < TotalElementsCount:
-                recipients.extend(self._get_sms_recipients(list_id, group_id, page_number + 1))
-        
-        return recipients
-    
+        return self._fetch_paginated(endpoint, params, parse_sms)
+
     def _get_email_recipients(
             self,
             recipient_type: str,
             list_id: str,
             group_id: Optional[str] = None,
             page_number: int = 0
-    ) -> Optional[List[Dict[str, str]]]:
+        ) -> Optional[List[Dict[str, str]]]:
         endpoint = f'{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/List/{list_id}/Recipients/{recipient_type}'
+        params = {"PageNumber": page_number}
         if group_id is not None:
-            endpoint += "?Groups=" + str(group_id)
-        params = {
-            "PageNumber": page_number,
-            "PageSize": self._PAGE_SIZE
-        }
+            params["Groups"] = str(group_id)
 
-        response = self._request("get", endpoint, headers=self._get_auth_headers(), params=params)
-        if response is None:
-            return None
-        if response.status_code != 200:
-            self._log_error(f"Error retrieving email recipients: {response.status_code} - {response.text}")
-            return None
-
-        data = response.json()
-        recipients = []
-        for item in data.get("Items", []):
-            recipient = {}
-            if "Fields" in item:
-                recipient = {
-                    f.get("Description"): f.get("Value") if f.get("Value") != "" else None
-                    for f in item["Fields"]
-                }
+        def parse_email(item: dict) -> dict:
+            recipient = {
+                f.get("Description"): f.get("Value") if f.get("Value") != "" else None
+                for f in item.get("Fields", [])
+            }
             recipient["idRecipient"] = str(item["idRecipient"])
             recipient["Email"] = item["Email"]
             if "Optin_Date" in item:
@@ -323,15 +334,9 @@ class MailUpPZ:
             if "MobileNumber" in item and "MobilePrefix" in item:
                 recipient["MobileNumber"] = item["MobileNumber"]
                 recipient["MobilePrefix"] = item["MobilePrefix"]
-            recipients.append(recipient)
+            return recipient
 
-        if response.json().get("IsPaginated"):
-            skipped = response.json()["Skipped"]
-            TotalElementsCount = response.json()["TotalElementsCount"]
-            if skipped + self._PAGE_SIZE < TotalElementsCount:
-                recipients.extend(self._get_email_recipients(recipient_type, list_id, group_id, page_number + 1))
-
-        return recipients
+        return self._fetch_paginated(endpoint, params, parse_email)
 
     def _create_recipient(
             self,
@@ -478,3 +483,21 @@ class MailUpPZ:
         """Iscrive un destinatario esistente a un gruppo specifico."""
         endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Group/{group_id}/Subscribe/{id}"
         self._request("post", endpoint, headers=self._get_auth_headers())
+
+    def retrieve_group_recipients(
+            self,
+            group_id: str
+        ) -> Optional[List[Dict[str, str]]]:
+        endpoint = f"{self._BASE_URL}/API/{self._API_VERSION}/Rest/ConsoleService.svc/Console/Group/{group_id}/Recipients"
+        params = {"PageNumber": 0}
+
+        def parse_group(item: dict) -> dict:
+            recipient = {
+                f.get("Description"): f.get("Value") if f.get("Value") != "" else None
+                for f in item.get("Fields", [])
+            }
+            recipient["idRecipient"] = str(item.get("idRecipient", ""))
+            recipient["Email"] = item.get("Email", "")
+            return recipient
+
+        return self._fetch_paginated(endpoint, params, parse_group)
